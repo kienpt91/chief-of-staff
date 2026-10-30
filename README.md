@@ -118,7 +118,9 @@ with stdout and stderr appended to `logs/<dispatch>.log`.
   but its mtime is older than that, the worker is killed as `stalled`. No heartbeat file, no enforcement.
 - **Environment**: only an allowlist from the parent (`PATH HOME USER LOGNAME SHELL LANG LC_ALL LC_CTYPE TERM TMPDIR TZ`
   plus `envAllow` from the config), then the worker's `env` from the config (placeholders expanded), then
-  `COS_RUN COS_TASK COS_DISPATCH COS_BRIEF COS_WORKTREE COS_REPO`. Anything else in your shell (tokens, cloud credentials) is not passed.
+  `COS_RUN COS_TASK COS_DISPATCH COS_BRIEF COS_WORKTREE COS_REPO`. Other environment variables of your shell (tokens, cloud credentials)
+  are not passed. That is all the allowlist does: it filters environment variables. `HOME` is on the list, so files under your home directory
+  (`~/.ssh`, `~/.aws`, ...) remain readable by the worker; see [Security model](#security-model).
 - **Timeouts**: after `timeoutSec` the whole process group gets SIGTERM, then SIGKILL after `killGraceSec`.
   When the worker exits, leftover members of its process group are killed too.
 
@@ -160,14 +162,24 @@ Read from the repository root (or `--config <path>`) every time a task is dispat
 | `concurrency` | default for `run start --concurrency` | `2` |
 | `envAllow` | extra variable names to pass through from the parent environment | `[]` |
 | `killGraceSec` | SIGTERM to SIGKILL delay | `2` |
+| `limits.workerFileBytes` | largest accepted `.cos/question.json` / `.cos/result.json` (bytes); larger, non-regular or symlinked files are ignored with a warning | `65536` |
+| `limits.fieldChars` | characters kept of a question, summary or message | `4000` |
+| `limits.filesModified` | entries kept of `result.filesModified` | `200` |
+| `limits.gateOutputBytes` | trailing bytes of a gate log that are read | `262144` |
+| `limits.outputBytes` | a worker or gate whose output files grow past this is killed | `67108864` |
 
 Placeholders (workers and gates): `{briefPath}` `{taskId}` `{dispatchId}` `{worktree}` `{repo}` `{runId}`.
 A task can pick a worker with `worker: <name>` (plan file or `--worker`); the default is `default`.
 
 **Gates.** After a worker finishes with success, every gate runs in the worktree, in order, and all are evaluated.
 The task moves `dispatched -> review -> completed` only if all pass. If any fails, the task is `failed`, the
-gate's exit code and output tail (16 KB) are stored on the dispatch, and `cos retry` re-dispatches into the same
-worktree with a "Previous attempt failed" section in the brief that contains that output.
+gate's exit code and output tail (16 KB of text, taken from the last 256 KB of the log) are stored on the dispatch, and `cos retry`
+re-dispatches into the same worktree with a "Previous attempt failed" section in the brief that contains that output.
+Gates run against the tree the worker just edited, including any tool configuration inside it, so a passing gate shows that the command
+exited as expected on the worker's result, not that the worker could not influence it.
+
+In shell mode (no `args`) every placeholder is substituted as a single-quoted shell word, so paths with spaces or `$(...)` are safe;
+do not put quotes around a placeholder yourself. `args` mode runs no shell at all and is the better default.
 
 With `"format": "refcheck-json"` the gate's stdout is parsed as
 
@@ -245,7 +257,7 @@ loaded 4 task(s) into run demo
 
 $ cos status
 Run demo: Add a users table, an API on top of it, a login page and the docs
-  base main@c166c88, integration branch cos/demo/integration
+  base main@81ffa9f, integration branch cos/demo/integration
   4 task(s): 2 pending, 1 ready, 1 blocked
 
   level 0 (no dependencies)
@@ -330,7 +342,7 @@ all tasks completed and merged into the integration branch
 
 $ cos status
 Run demo: Add a users table, an API on top of it, a login page and the docs
-  base main@c166c88, integration branch cos/demo/integration
+  base main@81ffa9f, integration branch cos/demo/integration
   4 task(s): 4 completed
 
   level 0 (no dependencies)
@@ -347,25 +359,25 @@ Run demo: Add a users table, an API on top of it, a login page and the docs
                         after: api, ui
 
 $ git log --oneline --graph cos/demo/integration
-*   205f546 Merge task docs: Write the docs
+*   012a07e Merge task docs: Write the docs
 |\  
-| * 0728ad6 fake-worker: Write the docs
+| * b0f282e fake-worker: Write the docs
 |/  
-*   b1c171a Merge task ui: Build the login page
+*   704b0d7 Merge task ui: Build the login page
 |\  
-| * 0a34eef fake-worker: Build the login page
-| * f5a7ee9 fake-worker: Build the login page
-* |   dc0530d Merge task api: Add the users API
+| * 3ef9cb5 fake-worker: Build the login page
+| * baee457 fake-worker: Build the login page
+* |   4a89ec7 Merge task api: Add the users API
 |\ \  
 | |/  
 |/|   
-| * b64c047 fake-worker: Add the users API
+| * 920d975 fake-worker: Add the users API
 |/  
-*   3e2ab72 Merge task schema: Create the users table
+*   5276bea Merge task schema: Create the users table
 |\  
-| * feeaf22 fake-worker: Create the users table
+| * 95543e3 fake-worker: Create the users table
 |/  
-* c166c88 initial commit
+* 81ffa9f initial commit
 
 $ git show cos/demo/integration:fake-output/api.txt
 task api: Add the users API
@@ -448,18 +460,20 @@ Notes on behaviour that is easy to miss:
   (the integration branch is unchanged), the task becomes `blocked` with the conflicting paths, and an escalation lands in the inbox.
   `cos retry --task X` re-dispatches the worker with the conflict described in the brief; `cos merge --task X` tries again.
 - **`cos cleanup`** removes worktrees under `.cos-worktrees/` only. It skips a worktree with uncommitted changes (including
-  untracked files) unless `--force`, always skips one whose worker is running, and never deletes branches unless `--branches`
-  (which only deletes branches already merged into the integration branch, or all task branches with `--force`). The integration
+  untracked files) unless `--force`, always skips one whose worker is running or that is a symlink, and never deletes branches unless `--branches`
+  (which only deletes branches already merged into the integration branch; `--force` does not widen that). The integration
   branch is never deleted.
-- **Safety**: `cos` refuses to run outside a git repository, creates only refs and the directories above, and adds `.cos-worktrees/` and `.cos/`
-  to `.git/info/exclude`. Your current branch and working tree are not modified.
+- **Safety**: `cos` refuses to run outside a git repository, creates only refs and the directories above, and adds `.cos-worktrees/` and `.cos`
+  to `.git/info/exclude` (`.git/cos/` is inside the git directory). Your current branch and working tree are not modified. `cos.config.json` is
+  executable content: worker and gate commands in it are run on every dispatch, and `cos` prints a note when the file is tracked by git.
 
 ## Crash recovery
 
 Each dispatch file records the supervisor's pid (plus its start time from `ps`, to avoid pid reuse) and the worker's pid. Workers write
 to log files rather than pipes and run in their own process group, so they survive a killed supervisor. Every `cos` command starts by
 looking for dispatches that are `running`/`gating` whose supervisor is gone. Those are marked `orphaned`, the leftover worker
-process group is stopped (only if the pid still has the recorded start time), the task becomes `failed` with an escalation message,
+process group is stopped (only if a start time was recorded, it still matches, and the process still leads its own group; otherwise it is left alone and the
+dispatch gets a warning), the task becomes `failed` with an escalation message,
 and `cos retry` runs it again in the same worktree. `SIGINT`/`SIGTERM`/`SIGHUP` to `cos` kill the running workers and exit 130; the next command then
 marks them orphaned. Both paths are covered by tests that start the real CLI in a child process and `SIGKILL` it.
 
@@ -474,20 +488,41 @@ cos.addTask(run.id, { id: "schema", title: "Schema", spec: "Create db/schema.sql
 const summary = await cos.start(run.id, { concurrency: 2, retries: 1 });
 ```
 
+## Security model
+
+What `cos` guarantees, and what it does not. The worker is trusted to the extent of "ordinary process run by you"; `cos` hardens its own side of the interface.
+
+- **Environment.** Workers, gates and every git process started by `cos` receive only the allowlisted variables (plus the worker's own `env` and the `COS_*` variables).
+  A hook, filter or merge driver planted in the shared `.git` therefore sees no more environment than the worker itself.
+- **Config-driven execution in git.** Every git call made by `cos` is run with hooks, fsmonitor, pager, editor, ssh command, credential helpers and commit signing switched off
+  on the command line, and (for commands that can run them) with every filter, textconv, external diff, merge driver, per-command pager and signing program named in the
+  repository config overridden. `commit --no-verify` is used for the leftover commit. This means your own hooks do not run for `cos`'s commits and merges. Not covered: a driver
+  that a concurrently running worker adds to the shared `.git/config` between `cos` listing the config and starting the command (it would still run with the allowlisted environment only),
+  and anything a worker does to the repository that git itself does not execute.
+- **Files the worker controls** (`.cos/question.json`, `.cos/result.json`, `.cos/heartbeat`, gate logs): read only if `.cos` is a real directory and the file is a regular, non-symlink
+  file within `limits.workerFileBytes` (opened with `O_NOFOLLOW|O_NONBLOCK`, so a FIFO or symlink cannot block or redirect the read). Stored text is clipped. Rejections are recorded as warnings on the dispatch.
+  `.cos` is replaced if it is not a real directory before the coordinator writes into it, and is excluded from git including as a symlink.
+- **Process control.** `cos` only signals a worker's process group if the recorded pid is an integer above 1, its recorded start time matches, and it leads its own group.
+- **Locks and state.** State files are written atomically; locks are never taken from a live owner and are released only by their owner. State under `.git/cos` is plain files writable by
+  anything running as your user, workers included; it is not tamper-proof.
+- **Not guaranteed.** Isolation from the rest of your machine, from `HOME`, or from the network; that a gate cannot be influenced by the tree it checks; protection against a malicious
+  `cos.config.json` (it is code).
+
 ## Limitations
 
 - **Single machine.** All state is files under `.git/cos/` guarded by directory locks; there are no remote workers and no network protocol.
-- **POSIX only.** Process groups and `ps` are used for supervision and recovery; Windows is not supported. Tested on macOS (Node 22.19 and 20.20). The CI workflow
+- **POSIX only.** Process groups and `ps` are used for supervision and recovery; Windows is not supported. Tested on macOS with git 2.50 (Node 22.19 and 20.20); older git versions are untested (`git worktree remove` needs 2.17). The CI workflow
   runs the same suite on Linux with Node 20 and 22; I have not run it there.
 - **No authentication or authorization.** Whoever can run `cos` in the repository can answer questions, resolve gates and run configured commands.
-- **No sandbox.** The environment allowlist keeps your shell's secrets out of workers, but a worker is an ordinary process with your permissions and can read
-  or write anything your user can. Gates are the same.
+- **No sandbox.** The environment allowlist keeps your shell's environment variables out of workers, but a worker is an ordinary process with your permissions and can read
+  or write anything your user can, including `~/.ssh`, `~/.aws` and the shared `.git` of the repository (and with it `.git/cos/`). Gates are the same. Run workers in a
+  container or as a separate user if that matters to you.
 - **No cost, token or rate-limit accounting.** `cos` does not know what your worker command spends.
 - **`cos dispatch` and `cos run start` supervise workers from the terminal process.** Ctrl-C, SIGTERM and SIGHUP (closing the terminal) kill the running workers; SIGKILL or a crash leaves them
   running until the next `cos` command marks them orphaned and stops them. Either way the tasks must be retried; there is no daemon. A retried task continues in the same worktree, it does not resume the worker's conversation.
 - **Questions are detected by polling** `.cos/question.json` every 250 ms while the worker runs.
 - **Dependents see dependency work only through the integration branch.** If you dispatch with merging impossible (conflict), the dependent cannot start.
-- **Gates run sequentially and only after a successful worker.** Output is capped at 16 KB per gate.
+- **Gates run sequentially and only after a successful worker.** At most the last 256 KB of a gate log is read and 16 KB of it stored; a gate that writes more than 64 MB is killed.
 - **Missing worker binaries** show up as exit code 127 on macOS (observed); a platform that reports a spawn error instead is recorded as a failed dispatch too, with different text.
 - **Quality of the plan is yours.** `cos` validates the graph, not whether the tasks make sense. `refcheck-json` parsing is tested with fixtures only.
 - Dev dependencies carry open advisories that I could not fix within the 30-day dependency cutoff; see [SECURITY.md](SECURITY.md).
@@ -497,7 +532,7 @@ const summary = await cos.start(run.id, { concurrency: 2, retries: 1 });
 ```bash
 npm install
 npm run typecheck
-npm test        # 112 tests; they use real git repositories in temp directories and need no network
+npm test        # 150 tests; they use real git repositories in temp directories and need no network
 npm run build
 ```
 
