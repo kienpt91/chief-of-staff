@@ -1,16 +1,30 @@
 import type { Ctx } from "./context.js";
-import { sleepSync } from "./fsutil.js";
-import { isSameProcess, killGroup } from "./process.js";
+import { pidAlive, sleepSync } from "./fsutil.js";
+import { isSameProcess, isVerifiedGroupLeader, killGroup } from "./process.js";
 import { refreshTx } from "./tasks.js";
 import type { Dispatch } from "./types.js";
 
-function stopOrphanedWorker(d: Dispatch, graceMs: number): boolean {
-  if (d.pid === undefined || !isSameProcess(d.pid, d.pidStart)) return false;
-  killGroup(d.pid, "SIGTERM");
+interface StopResult {
+  stopped: boolean;
+  note?: string;
+}
+
+/**
+ * Stops the process group of a worker whose supervisor died. The recorded pid is only signalled when it
+ * is still the same process (recorded start time matches) and still leads its own process group;
+ * if either fact is unknown the process is left alone and the dispatch record says so.
+ */
+function stopOrphanedWorker(d: Dispatch, graceMs: number): StopResult {
+  const pid = d.pid;
+  if (pid === undefined || !Number.isInteger(pid) || pid <= 1 || !pidAlive(pid)) return { stopped: false };
+  if (!isVerifiedGroupLeader(pid, d.pidStart)) {
+    return { stopped: false, note: `worker pid ${pid} is still alive but could not be verified as the recorded worker (missing or different start time, or not a process group leader); it was not signalled` };
+  }
+  killGroup(pid, "SIGTERM");
   const deadline = Date.now() + graceMs;
-  while (Date.now() < deadline && isSameProcess(d.pid, d.pidStart)) sleepSync(25);
-  killGroup(d.pid, "SIGKILL");
-  return true;
+  while (Date.now() < deadline && pidAlive(pid)) sleepSync(25);
+  if (pidAlive(pid) && isVerifiedGroupLeader(pid, d.pidStart)) killGroup(pid, "SIGKILL");
+  return { stopped: true };
 }
 
 /**
@@ -29,14 +43,15 @@ export function recoverOrphans(ctx: Ctx, runId?: string): Dispatch[] {
       if (candidate.status !== "running" && candidate.status !== "gating") continue;
       if (isSameProcess(candidate.supervisorPid, candidate.supervisorStart)) continue;
 
-      const killed = stopOrphanedWorker(candidate, graceMs);
+      const stop = stopOrphanedWorker(candidate, graceMs);
       const done = ctx.store.tx(run.id, (s) => {
         const d = s.getDispatch(run.id, candidate.id);
         if (d.status !== "running" && d.status !== "gating") return undefined; // someone else recovered it
-        const reason = `supervisor process ${d.supervisorPid} is gone; dispatch ${d.id} was interrupted while ${d.status}${killed ? " (leftover worker process group stopped)" : ""}`;
+        const reason = `supervisor process ${d.supervisorPid} is gone; dispatch ${d.id} was interrupted while ${d.status}${stop.stopped ? " (leftover worker process group stopped)" : ""}`;
         d.status = "orphaned";
         d.failureKind = "orphaned";
         d.failure = reason;
+        if (stop.note) d.warnings = [...(d.warnings ?? []), stop.note].slice(-20);
         d.endedAt = new Date().toISOString();
         s.putDispatch(d);
 
@@ -53,7 +68,7 @@ export function recoverOrphans(ctx: Ctx, runId?: string): Dispatch[] {
           to: "coordinator",
           taskId: d.taskId,
           dispatchId: d.id,
-          body: `task ${d.taskId}: ${reason}. Use "cos retry --task ${d.taskId}" to run it again.`,
+          body: `task ${d.taskId}: ${reason}${stop.note ? `. Warning: ${stop.note}` : ""}. Use "cos retry --task ${d.taskId}" to run it again.`,
         });
         refreshTx(s, run.id);
         return d;
