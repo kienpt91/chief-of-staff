@@ -17,7 +17,7 @@ export interface CleanupOptions {
   taskId?: string;
   /** discard uncommitted changes */
   force?: boolean;
-  /** also delete task branches that are merged into the integration branch (all of them with force) */
+  /** also delete task branches that are already merged into the integration branch (never unmerged ones, even with force) */
   branches?: boolean;
 }
 
@@ -42,11 +42,16 @@ function registeredWorktrees(ctx: Ctx): Set<string> {
   return set;
 }
 
-function assertInsideWorktreeRoot(ctx: Ctx, target: string): void {
-  const root = worktreesRoot(ctx) + path.sep;
-  if (!path.resolve(target).startsWith(root)) {
-    throw new CosError(`refusing to touch ${target}: it is outside ${root}`);
-  }
+/**
+ * A worktree path is only touched when, after resolving symlinks, it is a real directory inside
+ * `<repo>/.cos-worktrees/`. A symlink planted in that tree must not redirect a removal.
+ */
+function containmentProblem(ctx: Ctx, target: string): string | undefined {
+  const st = fs.lstatSync(target);
+  if (st.isSymbolicLink() || !st.isDirectory()) return "not a real directory (symlink or file); refusing to touch it";
+  const root = fs.realpathSync(worktreesRoot(ctx)) + path.sep;
+  if (!fs.realpathSync(target).startsWith(root)) return `outside ${root}; refusing to touch it`;
+  return undefined;
 }
 
 /**
@@ -78,7 +83,11 @@ export function cleanup(ctx: Ctx, opts: CleanupOptions = {}): CleanupEntry[] {
         if (opts.taskId) entries.push({ runId: run.id, name: target.name, path: target.wt, action: "skipped", reason: "no worktree on disk" });
         continue;
       }
-      assertInsideWorktreeRoot(ctx, target.wt);
+      const problem = containmentProblem(ctx, target.wt);
+      if (problem) {
+        entries.push({ runId: run.id, name: target.name, path: target.wt, action: "skipped", reason: problem });
+        continue;
+      }
       const entry: CleanupEntry = { runId: run.id, name: target.name, path: target.wt, action: "skipped" };
       entries.push(entry);
 
@@ -108,12 +117,9 @@ export function cleanup(ctx: Ctx, opts: CleanupOptions = {}): CleanupEntry[] {
       entry.action = "removed";
 
       if (opts.branches && target.branch) {
+        // only branches whose commits are already in the integration branch; --force never widens this
         const merged = gitTry(ctx.repo.root, ["merge-base", "--is-ancestor", target.branch, integrationBranchName(run.id)]).ok;
-        if (merged || opts.force) {
-          entry.branch = gitTry(ctx.repo.root, ["branch", "-D", target.branch]).ok ? "deleted" : "kept";
-        } else {
-          entry.branch = "kept";
-        }
+        entry.branch = merged && gitTry(ctx.repo.root, ["branch", "-D", target.branch]).ok ? "deleted" : "kept";
       }
     }
     const runWtDir = path.join(worktreesRoot(ctx), run.id);

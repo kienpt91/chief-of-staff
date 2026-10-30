@@ -2,9 +2,11 @@ import fs from "node:fs";
 import path from "node:path";
 import type { Ctx } from "./context.js";
 import { CosError } from "./errors.js";
-import { atomicWriteJson } from "./fsutil.js";
+import { atomicWriteJson, clipText, ensureRealDir } from "./fsutil.js";
 import { refreshTx } from "./tasks.js";
 import { MESSAGE_TYPES, type Message, type MessageType } from "./types.js";
+
+const MAX_MESSAGE_CHARS = 8000;
 
 export interface SendInput {
   runId: string;
@@ -35,7 +37,7 @@ export function sendMessage(ctx: Ctx, input: SendInput): Message {
       to,
       taskId: input.taskId ?? (to === "coordinator" ? undefined : to),
       dispatchId: input.dispatchId,
-      body: input.body,
+      body: clipText(input.body, MAX_MESSAGE_CHARS),
       payload: input.payload,
     });
   });
@@ -48,7 +50,10 @@ function deliverToWorktree(ctx: Ctx, message: Message): void {
   const task = ctx.store.findTask(message.runId, message.to);
   const dispatch = task?.lastDispatchId ? ctx.store.findDispatch(message.runId, task.lastDispatchId) : undefined;
   if (!dispatch?.worktree || !fs.existsSync(dispatch.worktree)) return;
-  atomicWriteJson(path.join(dispatch.worktree, ".cos", "inbox", `${message.id}.json`), message);
+  const cosDir = path.join(dispatch.worktree, ".cos");
+  ensureRealDir(cosDir);
+  ensureRealDir(path.join(cosDir, "inbox"));
+  atomicWriteJson(path.join(cosDir, "inbox", `${message.id}.json`), message);
 }
 
 export interface InboxQuery {
@@ -115,7 +120,9 @@ export function answerQuestion(ctx: Ctx, runId: string, messageId: string, text:
     };
   });
   if (running && worktree) {
-    atomicWriteJson(path.join(worktree, ".cos", "answer.json"), {
+    const cosDir = path.join(worktree, ".cos");
+    ensureRealDir(cosDir);
+    atomicWriteJson(path.join(cosDir, "answer.json"), {
       messageId: message.id,
       question: message.body,
       answer: message.answer?.text,

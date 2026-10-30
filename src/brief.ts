@@ -18,9 +18,21 @@ export interface BriefInput {
 /** Headings other tools (including the example worker) rely on. */
 export const BRIEF_SPEC_HEADING = "## Task specification";
 
+/** Collapses whitespace so free text from workers or operators stays on one line and cannot start a heading. */
+function oneLine(s: string, max = 2000): string {
+  const flat = s.replace(/\s+/g, " ").trim();
+  return flat.length > max ? `${flat.slice(0, max - 3)}...` : flat;
+}
+
+/** A code fence longer than any backtick run in `text`, so the text cannot close it. */
+function fenceFor(text: string): string {
+  const longest = Math.max(0, ...(text.match(/`+/g) ?? []).map((m) => m.length));
+  return "`".repeat(Math.max(3, longest + 1));
+}
+
 export function buildBrief(b: BriefInput): string {
   const out: string[] = [];
-  out.push(`# Task brief: ${b.task.title}`);
+  out.push(`# Task brief: ${oneLine(b.task.title, 200)}`);
   out.push("");
   out.push(`Run \`${b.run.id}\` | task \`${b.task.id}\` | dispatch \`${b.dispatchId}\` (attempt ${b.attempt})`);
   out.push(`Branch \`${b.branch}\`, worktree \`${b.worktree}\``);
@@ -55,7 +67,7 @@ export function buildBrief(b: BriefInput): string {
     out.push("");
     out.push("Their changes are already merged into the integration branch your worktree was created from.");
     out.push("");
-    for (const d of b.dependencies) out.push(`- \`${d.id}\` ${d.title}${d.summary ? `: ${d.summary}` : ""}`);
+    for (const d of b.dependencies) out.push(`- \`${d.id}\` ${oneLine(d.title, 200)}${d.summary ? `: ${oneLine(d.summary, 500)}` : ""}`);
     out.push("");
   }
 
@@ -63,8 +75,8 @@ export function buildBrief(b: BriefInput): string {
     out.push("## Answers to your earlier questions");
     out.push("");
     for (const a of b.answers) {
-      out.push(`- Q: ${a.question}`);
-      out.push(`  A: ${a.answer}`);
+      out.push(`- Q: ${oneLine(a.question)}`);
+      out.push(`  A: ${oneLine(a.answer)}`);
     }
     out.push("");
   }
@@ -73,8 +85,8 @@ export function buildBrief(b: BriefInput): string {
     out.push("## Decisions made by the coordinator");
     out.push("");
     for (const d of b.decisions) {
-      out.push(`- ${d.question}`);
-      out.push(`  Decision: ${d.decision}`);
+      out.push(`- ${oneLine(d.question)}`);
+      out.push(`  Decision: ${oneLine(d.decision)}`);
     }
     out.push("");
   }
@@ -82,17 +94,19 @@ export function buildBrief(b: BriefInput): string {
   if (b.previousFailure) {
     out.push("## Previous attempt failed");
     out.push("");
-    out.push(`Dispatch \`${b.previousFailure.dispatchId}\` did not pass: ${b.previousFailure.reason}`);
+    out.push(`Dispatch \`${b.previousFailure.dispatchId}\` did not pass: ${oneLine(b.previousFailure.reason, 1000)}`);
     out.push("Your earlier work is still on this branch. Fix the problems below instead of starting over.");
     out.push("");
     for (const g of b.previousFailure.gates.filter((x) => !x.passed)) {
       out.push(`### Gate \`${g.name}\` failed (${g.summary})`);
       out.push("");
-      out.push(`Command: \`${g.command}\``);
+      out.push(`Command: \`${oneLine(g.command, 300)}\``);
       out.push("");
-      out.push("```text");
-      out.push(g.output.trimEnd() || "(no output)");
-      out.push("```");
+      const body = g.output.trimEnd() || "(no output)";
+      const marks = fenceFor(body);
+      out.push(`${marks}text`);
+      out.push(body);
+      out.push(marks);
       out.push("");
     }
   }

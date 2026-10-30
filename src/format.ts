@@ -23,6 +23,7 @@ export function formatDispatch(d: Dispatch): string {
   const lines = [`dispatch ${d.id} for task ${d.taskId}: ${d.status} (attempt ${d.attempt})`];
   if (d.failure) lines.push(`  ${oneLine(d.failure, 160)}`);
   for (const g of d.gates ?? []) lines.push(`  gate ${g.name}: ${g.passed ? "passed" : "FAILED"} (${g.summary})`);
+  for (const w of d.warnings ?? []) lines.push(`  warning: ${oneLine(w, 160)}`);
   return lines.join("\n");
 }
 
@@ -57,6 +58,7 @@ export function formatTask(t: Task, dispatches: Dispatch[]): string {
   for (const d of dispatches) {
     lines.push(`  ${d.id} (attempt ${d.attempt}): ${d.status}${d.exitCode !== undefined && d.exitCode !== null ? `, exit ${d.exitCode}` : ""}`);
     if (d.failure) lines.push(`    ${oneLine(d.failure, 200)}`);
+    for (const w of d.warnings ?? []) lines.push(`    warning: ${oneLine(w, 200)}`);
     for (const g of d.gates ?? []) {
       lines.push(`    gate ${g.name}: ${g.passed ? "passed" : "FAILED"} (${g.summary})`);
       if (!g.passed && g.output.trim() !== "") lines.push(indent(g.output.trimEnd(), "      | "));

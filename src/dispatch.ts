@@ -7,15 +7,25 @@ import {
   buildEnv,
   resolveInvocation,
   type Config,
+  type Limits,
   type Placeholders,
   type WorkerConfig,
 } from "./config.js";
-import { taskBranch, taskWorktreePath, type Ctx } from "./context.js";
+import { EXCLUDE_PATTERNS, taskBranch, taskWorktreePath, type Ctx } from "./context.js";
 import { topoOrder } from "./dag.js";
 import { CosError } from "./errors.js";
-import { atomicWrite, atomicWriteJson, readJson, tailText } from "./fsutil.js";
+import {
+  atomicWrite,
+  atomicWriteJson,
+  clipText,
+  ensureRealDir,
+  isRealDir,
+  readRegularFile,
+  tailText,
+  type SafeRead,
+} from "./fsutil.js";
 import { runGates } from "./gates.js";
-import { branchExists, git, gitTry, identityArgs, isDirty } from "./git.js";
+import { branchExists, ensureExcluded, git, gitTry, identityArgs, isDirty } from "./git.js";
 import { mergeTask } from "./merge.js";
 import { processFingerprint, runProcess, type RunProcessResult } from "./process.js";
 import { recoverOrphans } from "./recovery.js";
@@ -35,6 +45,19 @@ export interface DispatchOptions {
   worker?: string;
 }
 
+const warnedConfigs = new Set<string>();
+
+/** The config holds commands that get executed; say so once when it arrives with the repository. */
+function warnIfConfigTracked(ctx: Ctx): void {
+  if (warnedConfigs.has(ctx.configFile)) return;
+  warnedConfigs.add(ctx.configFile);
+  const rel = path.relative(ctx.repo.root, ctx.configFile);
+  if (rel.startsWith("..") || path.isAbsolute(rel)) return;
+  if (gitTry(ctx.repo.root, ["ls-files", "--error-unmatch", "--", rel]).ok) {
+    ctx.log(`note: ${rel} is tracked by git; the worker and gate commands in it will be executed. Review it if it came from someone else.`);
+  }
+}
+
 /**
  * Runs one attempt of a task to its conclusion: worktree, brief, worker process, quality gates.
  * Resolves once the attempt is finished (completed, failed, or waiting for a question answer).
@@ -52,8 +75,10 @@ export async function dispatchTask(
     throw new CosError(`task "${taskId}" is ${task.status}${task.blocked ? ` (${task.blocked.kind})` : ""}; only ready tasks can be dispatched`);
   }
   const config = ctx.loadConfig();
+  warnIfConfigTracked(ctx);
+  ensureExcluded(ctx.repo, EXCLUDE_PATTERNS);
   const workerName = opts.worker ?? task.worker ?? "default";
-  const worker = config.workers[workerName];
+  const worker = Object.hasOwn(config.workers, workerName) ? config.workers[workerName] : undefined;
   if (!worker) {
     const known = Object.keys(config.workers);
     throw new CosError(
@@ -143,14 +168,27 @@ function ensureWorktree(ctx: Ctx, run: Run, task: Task): string {
   return wt;
 }
 
+function lstatOrUndefined(p: string): fs.Stats | undefined {
+  try {
+    return fs.lstatSync(p);
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Prepares `<worktree>/.cos`. The worker controls this tree, so `.cos` (and `history`) must be real
+ * directories: anything else (a symlink pointing elsewhere, a file) is replaced before the coordinator writes into it.
+ */
 function prepareCosDir(worktree: string, dispatchId: string): string {
   const cosDir = path.join(worktree, ".cos");
-  fs.mkdirSync(cosDir, { recursive: true });
+  ensureRealDir(cosDir);
   const archive = path.join(cosDir, "history", `before-${dispatchId}`);
   for (const name of ["result.json", "question.json", "answer.json"]) {
     const src = path.join(cosDir, name);
-    if (!fs.existsSync(src)) continue;
-    fs.mkdirSync(archive, { recursive: true });
+    if (!lstatOrUndefined(src)) continue;
+    ensureRealDir(path.join(cosDir, "history"));
+    ensureRealDir(archive);
     fs.renameSync(src, path.join(archive, name));
   }
   fs.rmSync(path.join(cosDir, "heartbeat"), { force: true });
@@ -281,35 +319,75 @@ async function execute(ctx: Ctx, run: Run, config: Config, dispatch: Dispatch, w
         s.putDispatch(d);
       });
     },
-    onTick: () => pollQuestion(ctx, runId, dispatch.id, task.id, cosDir, seenQuestions),
+    onTick: () => pollQuestion(ctx, runId, dispatch.id, task.id, cosDir, seenQuestions, config.limits),
+    maxOutputBytes: config.limits.outputBytes,
   });
-  pollQuestion(ctx, runId, dispatch.id, task.id, cosDir, seenQuestions);
+  pollQuestion(ctx, runId, dispatch.id, task.id, cosDir, seenQuestions, config.limits);
 
   return conclude(ctx, run, config, dispatch, worktree, cosDir, vars, cosEnv, res, worker);
 }
 
-/** Turns a new `.cos/question.json` into an inbox question message (once per distinct write). */
-function pollQuestion(ctx: Ctx, runId: string, dispatchId: string, taskId: string, cosDir: string, seen: Set<string>): void {
+function addWarning(ctx: Ctx, runId: string, dispatchId: string, text: string): void {
+  ctx.log(`dispatch ${dispatchId}: ${text}`);
+  ctx.store.tx(runId, (s) => {
+    const d = s.getDispatch(runId, dispatchId);
+    d.warnings = [...(d.warnings ?? []), text].slice(-20);
+    s.putDispatch(d);
+  });
+}
+
+/** Reads a file the worker controls: `.cos` itself must be a real directory, the file a small regular file. */
+function readWorkerFile(cosDir: string, name: string, maxBytes: number): SafeRead {
+  if (!isRealDir(cosDir)) return { ok: false, missing: false, reason: "the .cos directory was replaced by a symlink or file" };
+  return readRegularFile(path.join(cosDir, name), maxBytes);
+}
+
+/**
+ * Turns a new `.cos/question.json` into an inbox question message (once per distinct write).
+ * The file is worker-controlled: it must be a small regular file, and the stored text is clipped.
+ */
+function pollQuestion(
+  ctx: Ctx,
+  runId: string,
+  dispatchId: string,
+  taskId: string,
+  cosDir: string,
+  seen: Set<string>,
+  limits: Limits,
+): void {
   const file = path.join(cosDir, "question.json");
-  let raw: string;
-  let mtime: number;
+  const read = readWorkerFile(cosDir, "question.json", limits.workerFileBytes);
+  if (!read.ok) {
+    const key = `rejected:${read.reason}`;
+    if (!read.missing && !seen.has(key)) {
+      seen.add(key);
+      addWarning(ctx, runId, dispatchId, `.cos/question.json ignored: ${read.reason}`);
+    }
+    return;
+  }
+  let mtime = 0;
   try {
-    raw = fs.readFileSync(file, "utf8");
-    mtime = fs.statSync(file).mtimeMs;
+    mtime = fs.lstatSync(file).mtimeMs;
   } catch {
     return;
   }
-  const signature = `${crypto.createHash("sha1").update(raw).digest("hex")}:${mtime}`;
+  const signature = `${crypto.createHash("sha1").update(read.text).digest("hex")}:${mtime}`;
   if (seen.has(signature)) return;
   let parsed: { question?: unknown; options?: unknown };
   try {
-    parsed = JSON.parse(raw) as typeof parsed;
+    parsed = JSON.parse(read.text) as typeof parsed;
   } catch {
     return; // partially written; look again on the next tick
   }
-  if (typeof parsed.question !== "string" || parsed.question.trim() === "") return;
+  if (typeof parsed !== "object" || parsed === null || typeof parsed.question !== "string" || parsed.question.trim() === "") return;
   seen.add(signature);
-  const options = Array.isArray(parsed.options) ? parsed.options.filter((o): o is string => typeof o === "string") : undefined;
+  const question = clipText(parsed.question.trim(), limits.fieldChars);
+  const options = Array.isArray(parsed.options)
+    ? parsed.options
+        .filter((o): o is string => typeof o === "string")
+        .slice(0, MAX_OPTIONS)
+        .map((o) => clipText(o, MAX_OPTION_CHARS))
+    : undefined;
   ctx.store.tx(runId, (s) => {
     const m = s.addMessage({
       runId,
@@ -318,34 +396,57 @@ function pollQuestion(ctx: Ctx, runId: string, dispatchId: string, taskId: strin
       to: "coordinator",
       taskId,
       dispatchId,
-      body: (parsed.question as string).trim(),
+      body: question,
       payload: options && options.length > 0 ? { options } : undefined,
     });
-    ctx.log(`dispatch ${dispatchId}: task ${taskId} asks ${m.id}: ${m.body}`);
+    ctx.log(`dispatch ${dispatchId}: task ${taskId} asks ${m.id}: ${oneLine(m.body)}`);
   });
 }
 
-function readWorkerResult(cosDir: string): WorkerResult | undefined {
+const MAX_OPTIONS = 20;
+const MAX_OPTION_CHARS = 200;
+const MAX_FILE_NAME_CHARS = 300;
+
+function oneLine(s: string, max = 160): string {
+  const flat = s.replace(/\s+/g, " ").trim();
+  return flat.length > max ? `${flat.slice(0, max - 3)}...` : flat;
+}
+
+function readWorkerResult(ctx: Ctx, runId: string, dispatchId: string, cosDir: string, limits: Limits): WorkerResult | undefined {
+  const read = readWorkerFile(cosDir, "result.json", limits.workerFileBytes);
+  if (!read.ok) {
+    if (!read.missing) addWarning(ctx, runId, dispatchId, `.cos/result.json ignored: ${read.reason}`);
+    return undefined;
+  }
   let raw: unknown;
   try {
-    raw = readJson<unknown>(path.join(cosDir, "result.json"));
+    raw = JSON.parse(read.text);
   } catch {
+    addWarning(ctx, runId, dispatchId, ".cos/result.json ignored: not valid JSON");
     return undefined;
   }
   if (typeof raw !== "object" || raw === null) return undefined;
   const o = raw as Record<string, unknown>;
-  if (o.outcome !== "success" && o.outcome !== "failure") return undefined;
+  if (o.outcome !== "success" && o.outcome !== "failure") {
+    addWarning(ctx, runId, dispatchId, '.cos/result.json ignored: "outcome" must be "success" or "failure"');
+    return undefined;
+  }
   return {
     outcome: o.outcome,
-    summary: typeof o.summary === "string" ? o.summary : undefined,
-    filesModified: Array.isArray(o.filesModified) ? o.filesModified.filter((f): f is string => typeof f === "string") : undefined,
+    summary: typeof o.summary === "string" ? clipText(o.summary.trim(), limits.fieldChars) : undefined,
+    filesModified: Array.isArray(o.filesModified)
+      ? o.filesModified
+          .filter((f): f is string => typeof f === "string")
+          .slice(0, limits.filesModified)
+          .map((f) => clipText(f, MAX_FILE_NAME_CHARS))
+      : undefined,
   };
 }
 
 function commitLeftovers(worktree: string, taskId: string, dispatchId: string): void {
   if (!isDirty(worktree)) return;
   git(worktree, ["add", "-A"]);
-  git(worktree, [...identityArgs(worktree), "commit", "-m", `cos: uncommitted changes from task ${taskId} (${dispatchId})`]);
+  git(worktree, [...identityArgs(worktree), "commit", "--no-verify", "-m", `cos: uncommitted changes from task ${taskId} (${dispatchId})`]);
 }
 
 async function conclude(
@@ -362,7 +463,7 @@ async function conclude(
 ): Promise<Dispatch> {
   const runId = run.id;
   const taskId = dispatch.taskId;
-  const result = readWorkerResult(cosDir);
+  const result = readWorkerResult(ctx, runId, dispatch.id, cosDir, config.limits);
   ctx.store.tx(runId, (s) => {
     const d = s.getDispatch(runId, dispatch.id);
     d.exitCode = res.exitCode;
@@ -384,6 +485,8 @@ async function conclude(
     failure = { status: "timed_out", kind: "timeout", text: `worker timed out after ${timeoutSec}s and its process group was killed` };
   } else if (res.stalled) {
     failure = { status: "stalled", kind: "stalled", text: `no heartbeat for ${worker.heartbeatTimeoutSec}s; worker process group was killed` };
+  } else if (res.outputLimit) {
+    failure = { status: "failed", kind: "worker", text: `worker output exceeded ${config.limits.outputBytes} bytes; process group was killed` };
   } else if (res.exitCode !== 0) {
     const how = res.signal
       ? `was killed by ${res.signal}`

@@ -8,7 +8,7 @@ import {
   type GateConfig,
   type Placeholders,
 } from "./config.js";
-import { tailText } from "./fsutil.js";
+import { readRegularTail, tailText } from "./fsutil.js";
 import { runProcess } from "./process.js";
 import type { GateResult } from "./types.js";
 
@@ -37,7 +37,8 @@ interface RefcheckFinding {
 /**
  * Interprets the refcheck JSON contract:
  * {"version":1,"root":string,"filesChecked":number,"findings":[...],"summary":{"errors":n,"warnings":n}}
- * Fails when summary.errors > 0, when the output is not that JSON, or on exit code >= 2 (usage/internal error).
+ * Fails when summary.errors > 0 (or any finding has severity "error"), when the output is not that JSON,
+ * when the process was killed by a signal, or on exit code >= 2 (usage/internal error).
  */
 export function evaluateRefcheckJson(
   stdout: string,
@@ -63,28 +64,31 @@ export function evaluateRefcheckJson(
       output: tailText(stdout, OUTPUT_LIMIT),
     };
   }
-  const findings = obj.findings as RefcheckFinding[];
+  const findings = (obj.findings as unknown[]).filter((f): f is RefcheckFinding => typeof f === "object" && f !== null);
   const lines = findings.slice(0, MAX_FINDINGS_SHOWN).map((f) => {
     const where = `${String(f.file)}:${String(f.line)}:${String(f.column)}`;
     const hint = typeof f.suggestion === "string" ? ` (suggestion: ${f.suggestion})` : "";
     return `${where} ${String(f.severity)} ${String(f.rule)}: ${String(f.message)}${hint}`;
   });
   if (findings.length > MAX_FINDINGS_SHOWN) lines.push(`... and ${findings.length - MAX_FINDINGS_SHOWN} more findings`);
-  const summary = `${errors} error(s), ${typeof warnings === "number" ? warnings : 0} warning(s)`;
-  const exitBad = exitCode !== null && exitCode >= 2;
+  const reportedErrors = findings.filter((f) => f.severity === "error").length;
+  const effectiveErrors = Math.max(errors, reportedErrors);
+  const summary = `${effectiveErrors} error(s), ${typeof warnings === "number" ? warnings : 0} warning(s)${
+    reportedErrors > errors ? " (summary.errors disagrees with the findings)" : ""
+  }`;
+  // exit 0 or 1 are the contract's codes; a signal (null) or anything else means the tool did not finish properly
+  const exitBad = exitCode === null || exitCode >= 2 || exitCode < 0;
   return {
-    passed: errors === 0 && !exitBad,
-    summary: exitBad ? `${summary}; exit code ${exitCode}` : summary,
+    passed: effectiveErrors === 0 && !exitBad,
+    summary: exitBad ? `${summary}; exit code ${exitCode ?? "none (killed by a signal)"}` : summary,
     output: lines.join("\n"),
   };
 }
 
-function readText(file: string): string {
-  try {
-    return fs.readFileSync(file, "utf8");
-  } catch {
-    return "";
-  }
+/** Reads at most the last `maxBytes` of a gate log; anything that is not a regular file reads as empty. */
+function readLog(file: string, maxBytes: number): string {
+  const r = readRegularTail(file, maxBytes);
+  return r.ok ? r.text : "";
 }
 
 export async function runGate(gate: GateConfig, ctx: GateRunContext): Promise<GateResult> {
@@ -107,6 +111,7 @@ export async function runGate(gate: GateConfig, ctx: GateRunContext): Promise<Ga
     stdoutPath: outPath,
     stderrPath: errPath,
     pollMs: ctx.pollMs,
+    maxOutputBytes: ctx.config.limits.outputBytes,
   });
   const durationMs = res.endedAt - res.startedAt;
   const base = { name: gate.name, format, command: inv.display, durationMs, timedOut: res.timedOut };
@@ -114,8 +119,17 @@ export async function runGate(gate: GateConfig, ctx: GateRunContext): Promise<Ga
   if (res.spawnError) {
     return { ...base, passed: false, exitCode: null, summary: `could not start: ${res.spawnError}`, output: "" };
   }
-  const stdout = readText(outPath);
-  const stderr = readText(errPath);
+  const stdout = readLog(outPath, ctx.config.limits.gateOutputBytes);
+  const stderr = readLog(errPath, ctx.config.limits.gateOutputBytes);
+  if (res.outputLimit) {
+    return {
+      ...base,
+      passed: false,
+      exitCode: res.exitCode,
+      summary: `output exceeded ${ctx.config.limits.outputBytes} bytes; killed`,
+      output: tailText([stdout, stderr].filter(Boolean).join("\n--- stderr ---\n"), OUTPUT_LIMIT),
+    };
+  }
   if (res.timedOut) {
     const combined = [stdout, stderr].filter(Boolean).join("\n--- stderr ---\n");
     return {
