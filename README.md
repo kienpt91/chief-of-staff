@@ -525,12 +525,12 @@ What `cos` guarantees, and what it does not. The worker is trusted to the extent
 - **Gates run sequentially and only after a successful worker.** At most the last 256 KB of a gate log is read and 16 KB of it stored; a gate that writes more than 64 MB is killed.
 - **Missing worker binaries** show up as exit code 127 on macOS (observed); a platform that reports a spawn error instead is recorded as a failed dispatch too, with different text.
 - **Quality of the plan is yours.** `cos` validates the graph, not whether the tasks make sense. `refcheck-json` parsing is tested with fixtures only.
-- Dev dependencies carry open advisories that I could not fix within the 30-day dependency cutoff; see [SECURITY.md](SECURITY.md).
+- Dependencies follow a 7-day cooldown and are installed with `--ignore-scripts`; `npm audit` reports no open advisories at the time of writing. See [SECURITY.md](SECURITY.md).
 
 ## Development
 
 ```bash
-npm install
+npm ci --ignore-scripts
 npm run typecheck
 npm test        # 150 tests; they use real git repositories in temp directories and need no network
 npm run build
