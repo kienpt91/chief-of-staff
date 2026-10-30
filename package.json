@@ -1,0 +1,51 @@
+{
+  "name": "chief-of-staff",
+  "version": "0.1.0",
+  "description": "Local orchestration for coding agents: a task DAG, one git worktree per task, message passing, decision gates and a quality gate before a task counts as done.",
+  "keywords": [
+    "coding-agents",
+    "orchestration",
+    "git-worktree",
+    "task-dag",
+    "quality-gate",
+    "cli"
+  ],
+  "license": "MIT",
+  "author": "Kien Phan",
+  "type": "module",
+  "bin": {
+    "cos": "dist/cli.js"
+  },
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "examples",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "vitest run",
+    "prepublishOnly": "npm run typecheck && npm test && npm run build"
+  },
+  "dependencies": {
+    "yaml": "2.9.1"
+  },
+  "devDependencies": {
+    "@types/node": "20.19.43",
+    "tsx": "4.23.15",
+    "typescript": "5.9.3",
+    "vitest": "3.2.7"
+  }
+}
