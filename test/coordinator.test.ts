@@ -50,7 +50,7 @@ describe("repository safety", () => {
     cos.createRun({ objective: "b", id: "r2" });
     const exclude = fs.readFileSync(path.join(repo, ".git", "info", "exclude"), "utf8").split("\n");
     expect(exclude.filter((l) => l === ".cos-worktrees/")).toHaveLength(1);
-    expect(exclude).toContain(".cos/");
+    expect(exclude).toContain(".cos");
   });
 
   it("rejects duplicate and malformed run ids", () => {

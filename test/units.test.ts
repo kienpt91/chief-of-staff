@@ -50,7 +50,7 @@ describe("config", () => {
 
   it("runs args directly but a bare command through the shell", () => {
     expect(resolveInvocation({ command: "agent", args: ["--brief", "{briefPath}"] }, vars)).toMatchObject({ command: "agent", args: ["--brief", "/b/brief.md"] });
-    expect(resolveInvocation({ command: "test -f {briefPath}" }, vars)).toMatchObject({ command: "/bin/sh", args: ["-c", "test -f /b/brief.md"] });
+    expect(resolveInvocation({ command: "test -f {briefPath}" }, vars)).toMatchObject({ command: "/bin/sh", args: ["-c", "test -f '/b/brief.md'"] });
   });
 
   it("builds the environment from an allowlist only", () => {
