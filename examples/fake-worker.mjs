@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 // A deterministic stand-in for a real coding agent, used by the demo and the test suite.
+// DEMO ONLY: it executes the directives found in task specs, so only feed it plans you wrote yourself.
 //
 // Usage: node fake-worker.mjs <briefPath>
 //
@@ -77,8 +78,20 @@ for (let i = 0; i < decisionLines.length; i++) {
 }
 
 function writeFile(rel, content) {
-  const target = path.join(worktree, rel);
+  // Demo-only worker, but still refuse to write outside the worktree (absolute paths, "..", symlink escapes).
+  const root = fs.realpathSync(worktree);
+  const target = path.resolve(root, rel);
+  const relative = path.relative(root, target);
+  if (relative === "" || relative.startsWith("..") || path.isAbsolute(relative)) {
+    console.error(`fake-worker: refusing to write outside the worktree: ${rel}`);
+    process.exit(1);
+  }
   fs.mkdirSync(path.dirname(target), { recursive: true });
+  const dirReal = fs.realpathSync(path.dirname(target));
+  if (dirReal !== root && !dirReal.startsWith(root + path.sep)) {
+    console.error(`fake-worker: refusing to write through a symlink out of the worktree: ${rel}`);
+    process.exit(1);
+  }
   fs.writeFileSync(target, `${content.replace(/\\n/g, "\n")}\n`);
 }
 
