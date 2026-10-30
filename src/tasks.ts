@@ -1,5 +1,5 @@
 import crypto from "node:crypto";
-import { integrationBranchName, type Ctx } from "./context.js";
+import { EXCLUDE_PATTERNS, WORKER_NAME_PATTERN, integrationBranchName, type Ctx } from "./context.js";
 import { refreshReadiness, validateGraph } from "./dag.js";
 import { CosError } from "./errors.js";
 import { branchExists, ensureExcluded, git, gitTry, hasCommits } from "./git.js";
@@ -25,6 +25,7 @@ export function createRun(ctx: Ctx, input: CreateRunInput): Run {
 
   const head = gitTry(ctx.repo.root, ["symbolic-ref", "--short", "-q", "HEAD"]);
   const baseRef = input.base ?? (head.ok && head.stdout.trim() !== "" ? head.stdout.trim() : "HEAD");
+  if (baseRef.startsWith("-")) throw new CosError(`invalid base "${baseRef}": it must not start with "-"`);
   const resolved = gitTry(ctx.repo.root, ["rev-parse", "--verify", "--quiet", `${baseRef}^{commit}`]);
   if (!resolved.ok) throw new CosError(`cannot resolve base "${baseRef}" to a commit`);
   const baseCommit = resolved.stdout.trim();
@@ -35,7 +36,7 @@ export function createRun(ctx: Ctx, input: CreateRunInput): Run {
   }
   // creates a ref only: the user's working tree and current branch are untouched
   git(ctx.repo.root, ["branch", integrationBranch, baseCommit]);
-  ensureExcluded(ctx.repo, [".cos-worktrees/", ".cos/"]);
+  ensureExcluded(ctx.repo, EXCLUDE_PATTERNS);
 
   const run: Run = {
     id,
@@ -89,6 +90,9 @@ export function addTasks(ctx: Ctx, runId: string, inputs: TaskInput[]): Task[] {
       }
       assertValidId("task", id);
       if (id === "integration") throw new CosError('"integration" is a reserved task id');
+      if (input.worker !== undefined && !WORKER_NAME_PATTERN.test(input.worker)) {
+        throw new CosError(`task "${id}": invalid worker name "${input.worker}"`);
+      }
       return { id, title, spec, input, after: input.after ?? [] };
     });
 

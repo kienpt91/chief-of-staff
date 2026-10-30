@@ -121,6 +121,8 @@ export interface Dispatch {
   signal?: string | null;
   result?: WorkerResult;
   gates?: GateResult[];
+  /** things the coordinator ignored or refused, e.g. an oversized or non-regular worker file */
+  warnings?: string[];
 }
 
 export type MessageType = "status" | "question" | "escalation" | "worker_done";

@@ -7,12 +7,20 @@ export interface Ctx {
   repo: RepoInfo;
   store: Store;
   loadConfig: () => Config;
+  /** absolute path of the configuration file (for diagnostics) */
+  configFile: string;
   /** How often supervisors poll running workers (questions, heartbeat). */
   pollMs: number;
   log: (message: string) => void;
 }
 
 export const WORKTREES_DIRNAME = ".cos-worktrees";
+
+/** Written to .git/info/exclude. `.cos` has no trailing slash on purpose, so a symlink named .cos is ignored too. */
+export const EXCLUDE_PATTERNS = [`${WORKTREES_DIRNAME}/`, ".cos"];
+
+/** Worker names as they may appear in plans and in the config. */
+export const WORKER_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,47}$/;
 export const INTEGRATION_DIRNAME = "_integration";
 
 export function worktreesRoot(ctx: Ctx): string {

@@ -53,6 +53,7 @@ export class Coordinator {
       repo,
       store,
       loadConfig: () => loadConfig(repo.root, opts.config),
+      configFile: path.resolve(repo.root, opts.config ?? "cos.config.json"),
       pollMs: opts.pollMs ?? 250,
       log: opts.log ?? (() => undefined),
     };

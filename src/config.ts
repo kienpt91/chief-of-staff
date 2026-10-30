@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { WORKER_NAME_PATTERN } from "./context.js";
 import { CosError } from "./errors.js";
 
 export interface CommandSpec {
@@ -27,7 +28,30 @@ export interface Config {
   /** Extra environment variable names passed through to workers and gates. */
   envAllow: string[];
   killGraceSec: number;
+  limits: Limits;
 }
+
+/** Bounds for everything a worker or gate can make the coordinator read or store. */
+export interface Limits {
+  /** largest accepted .cos/question.json or .cos/result.json, in bytes */
+  workerFileBytes: number;
+  /** characters kept of a question, summary or failure text */
+  fieldChars: number;
+  /** entries kept of result.filesModified */
+  filesModified: number;
+  /** only this many trailing bytes of a gate log are read */
+  gateOutputBytes: number;
+  /** a worker or gate is killed once its output files exceed this many bytes */
+  outputBytes: number;
+}
+
+export const DEFAULT_LIMITS: Limits = {
+  workerFileBytes: 64 * 1024,
+  fieldChars: 4000,
+  filesModified: 200,
+  gateOutputBytes: 256 * 1024,
+  outputBytes: 64 * 1024 * 1024,
+};
 
 export const DEFAULT_ENV_ALLOW = [
   "PATH",
@@ -47,8 +71,9 @@ export const DEFAULT_WORKER_TIMEOUT_SEC = 1800;
 export const DEFAULT_GATE_TIMEOUT_SEC = 600;
 
 export function defaultConfig(): Config {
-  return { workers: {}, gates: [], concurrency: 2, envAllow: [], killGraceSec: 2 };
+  return { workers: {}, gates: [], concurrency: 2, envAllow: [], killGraceSec: 2, limits: { ...DEFAULT_LIMITS } };
 }
+
 
 function fail(file: string, msg: string): never {
   throw new CosError(`${file}: ${msg}`);
@@ -87,6 +112,9 @@ export function parseConfig(file: string, raw: unknown): Config {
   if (o.workers !== undefined) {
     if (typeof o.workers !== "object" || o.workers === null || Array.isArray(o.workers)) fail(file, "workers must be an object");
     for (const [name, w] of Object.entries(o.workers)) {
+      if (!WORKER_NAME_PATTERN.test(name) || name === "__proto__" || name === "constructor" || name === "prototype") {
+        fail(file, `invalid worker name "${name}": use letters, digits, "-", "_" or "."`);
+      }
       const spec = parseCommand(file, `workers.${name}`, w) as WorkerConfig;
       const hb = (w as Record<string, unknown>).heartbeatTimeoutSec;
       if (hb !== undefined) {
@@ -127,6 +155,16 @@ export function parseConfig(file: string, raw: unknown): Config {
     if (typeof o.killGraceSec !== "number" || !(o.killGraceSec >= 0)) fail(file, "killGraceSec must be a number >= 0");
     config.killGraceSec = o.killGraceSec;
   }
+  if (o.limits !== undefined) {
+    if (typeof o.limits !== "object" || o.limits === null || Array.isArray(o.limits)) fail(file, "limits must be an object");
+    const l = o.limits as Record<string, unknown>;
+    for (const key of Object.keys(l)) {
+      if (!Object.hasOwn(DEFAULT_LIMITS, key)) fail(file, `unknown limit "${key}" (known: ${Object.keys(DEFAULT_LIMITS).join(", ")})`);
+      const v = l[key];
+      if (typeof v !== "number" || !Number.isInteger(v) || v < 1) fail(file, `limits.${key} must be a positive integer`);
+      config.limits[key as keyof Limits] = v;
+    }
+  }
   return config;
 }
 
@@ -158,9 +196,9 @@ export interface Placeholders {
   runId: string;
 }
 
-export function expand(template: string, vars: Placeholders): string {
+export function expand(template: string, vars: Placeholders, quote: (value: string) => string = (v) => v): string {
   return template.replace(/\{(\w+)\}/g, (m, key: string) =>
-    Object.hasOwn(vars, key) ? vars[key as keyof Placeholders] : m,
+    Object.hasOwn(vars, key) ? quote(vars[key as keyof Placeholders]) : m,
   );
 }
 
@@ -172,12 +210,18 @@ export interface Invocation {
 
 export function resolveInvocation(spec: CommandSpec, vars: Placeholders): Invocation {
   if (spec.args === undefined) {
-    const line = expand(spec.command, vars);
+    // Shell mode: every substituted value is single-quoted, so a path with spaces or shell
+    // metacharacters stays one word. Do not wrap placeholders in quotes yourself in this mode.
+    const line = expand(spec.command, vars, shellQuote);
     return { command: "/bin/sh", args: ["-c", line], display: line };
   }
   const command = expand(spec.command, vars);
   const args = spec.args.map((a) => expand(a, vars));
   return { command, args, display: [command, ...args].map(quoteForDisplay).join(" ") };
+}
+
+export function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
 function quoteForDisplay(s: string): string {

@@ -16,6 +16,14 @@ export function assertValidId(kind: string, id: string): void {
 
 type Counter = keyof Run["counters"];
 
+/** directory name -> singular label used in error messages */
+const KIND_LABEL: Record<string, string> = {
+  tasks: "task",
+  dispatches: "dispatch",
+  messages: "message",
+  decisions: "decision",
+};
+
 /**
  * File-per-entity JSON store:
  *
@@ -32,10 +40,13 @@ export class Store {
   constructor(readonly root: string) {}
 
   runDir(runId: string): string {
+    // ids reach this point from the command line; never let one escape the state directory
+    assertValidId("run", runId);
     return path.join(this.root, "runs", runId);
   }
 
   private file(runId: string, kind: string, id: string): string {
+    assertValidId(KIND_LABEL[kind] ?? kind, id);
     return path.join(this.runDir(runId), kind, `${id}.json`);
   }
 
