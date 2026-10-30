@@ -1,0 +1,17 @@
+{
+  "workers": {
+    "default": {
+      "command": "node",
+      "args": ["/path/to/chief-of-staff/examples/fake-worker.mjs", "{briefPath}"],
+      "env": { "FAKE_WORKER": "1" },
+      "timeoutSec": 300
+    }
+  },
+  "gates": [
+    {
+      "name": "no-todo",
+      "command": "! grep -rn TODO --exclude-dir=.git --exclude-dir=.cos ."
+    }
+  ],
+  "concurrency": 2
+}

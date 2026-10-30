@@ -1,0 +1,31 @@
+objective: Add a users table, an API on top of it, a login page and the docs
+tasks:
+  - id: schema
+    title: Create the users table
+    spec: |
+      Create db/schema.sql with the users table.
+      fake.write: db/schema.sql = CREATE TABLE users (id integer primary key, email text);
+    acceptance:
+      - db/schema.sql exists
+
+  - id: api
+    title: Add the users API
+    after: schema
+    spec: |
+      Implement the API on top of the schema.
+      fake.ask: Which auth scheme should the API use? (session or token)
+      fake.write: api/users.txt = GET /users
+
+  - id: ui
+    title: Build the login page
+    after: schema
+    spec: |
+      Build the login page.
+      fake.write: ui/login.txt = TODO: wire up login
+      fake.fix-on-retry: ui/login.txt = login wired to the API
+
+  - id: docs
+    title: Write the docs
+    after: [api, ui]
+    gate: Publish the docs under /docs or /wiki?
+    spec: Document the API and the login page.
