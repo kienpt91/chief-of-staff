@@ -3,3 +3,26 @@ dist/
 *.tsbuildinfo
 coverage/
 .DS_Store
+
+# Secret-like files: never commit these (also enforced by scripts/secret-scan.sh)
+.env
+.env.*
+!.env.example
+!.env.sample
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore
+id_rsa*
+id_ed25519*
+.netrc
+/credentials.json
+service-account*.json
+/secrets.json
+/secrets.yml
+/secrets.yaml
+/secrets.toml
+*.tfstate
+*.tfstate.*
